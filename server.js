@@ -8,125 +8,73 @@ import { exec } from "child_process";
 const app = express();
 app.use(express.json({ limit: "200mb" }));
 
-// Multer para archivos temporales
+// Multer para manejar archivos temporales
 const upload = multer({ dest: "/tmp" });
 
-// Utilidad para frase taoísta
+// Generador de frases taoístas
 function taoPhrase() {
   const frases = [
-    "Cuando el agua se calma, la verdad se refleja.",
     "El camino aparece cuando dejas de buscarlo con fuerza.",
-    "Nada que sea tuyo puede perderte; nada que te pierda era tuyo.",
-    "La mente que se vacía, encuentra dirección.",
-    "Si el ruido cae, la decisión sube.",
-    "La claridad es un filo que no corta, revela.",
-    "El paso correcto siempre es el más simple."
+    "Cuando el agua se calma, la verdad se refleja.",
+    "El guerrero sabio actúa sin ansiedad.",
+    "En la quietud, el universo responde.",
+    "La fuerza verdadera nace del equilibrio."
   ];
   return frases[Math.floor(Math.random() * frases.length)];
 }
 
-// ================================
-// UNIVERSAL MEDIA PROCESSOR
-// ================================
+// =======================================================
+// UNIVERSAL MEDIA PROCESSOR (video/audio/link)
+// =======================================================
 app.post("/process-media", upload.single("media"), async (req, res) => {
-  const stages = {};
+  const stages = { input: null, download: null, audio_extract: null, wav: null };
+  const tmpInput = `/tmp/input_${Date.now()}`;
+  const tmpWav = `/tmp/output_${Date.now()}.wav`;
 
   try {
-    // Detectar el tipo de input
-    const hasFile = !!req.file;
-    const hasUrl = req.body.url;
-    const hasText = req.body.text;
-
-    let inputPath = null;
-
-    // ========================================
-    // 1) PROCESAR ARCHIVO SUBIDO
-    // ========================================
-    if (hasFile) {
+    // ------------------------------
+    // 1. DETERMINAR TIPO DE INPUT
+    // ------------------------------
+    if (req.file) {
       stages.input = "file";
-      inputPath = req.file.path;
-    }
-
-    // ========================================
-    // 2) PROCESAR URL → descargar archivo
-    // ========================================
-    else if (hasUrl) {
+      fs.renameSync(req.file.path, tmpInput);
+    } else if (req.body.url) {
       stages.input = "url";
-      const url = req.body.url;
-
-      try {
-        const response = await axios.get(url, { responseType: "arraybuffer" });
-        inputPath = "/tmp/input_from_url";
-        fs.writeFileSync(inputPath, Buffer.from(response.data));
-        stages.download = "ok";
-      } catch (err) {
-        return res.status(400).json({
-          ok: false,
-          error: "No se pudo descargar el archivo desde la URL.",
-          details: err.message,
-          tao: taoPhrase()
-        });
-      }
-    }
-
-    // ========================================
-    // 3) SOLO TEXTO → pasa directo a análisis
-    // ========================================
-    else if (hasText) {
+      const video = await axios.get(req.body.url, { responseType: "arraybuffer" });
+      fs.writeFileSync(tmpInput, Buffer.from(video.data));
+      stages.download = "ok";
+    } else {
       stages.input = "text";
-
       return res.json({
         ok: true,
         type: "text",
-        summary: req.body.text,
-        insight: "Tu pensamiento tiene un patrón detectable.",
-        next_step: "Define qué parte de esta reflexión es acción y cuál es ruido.",
-        tao: taoPhrase(),
-        stages
-      });
-    }
-
-    else {
-      return res.status(400).json({
-        ok: false,
-        error: "No se envió archivo, texto ni URL.",
+        message: "Texto recibido. No hay media para procesar.",
         tao: taoPhrase()
       });
     }
 
-    // ========================================
-    // 4) EXTRAER AUDIO
-    // ========================================
-    const outputWav = `${inputPath}.wav`;
-
-    try {
-      await new Promise((resolve, reject) => {
-        exec(`ffmpeg -y -i "${inputPath}" -ar 16000 -ac 1 -f wav "${outputWav}"`, (err) => {
-          if (err) reject(err);
-          else resolve();
-        });
+    // ------------------------------
+    // 2. EXTRAER AUDIO → WAV
+    // ------------------------------
+    await new Promise((resolve, reject) => {
+      exec(`ffmpeg -y -i "${tmpInput}" -ar 16000 -ac 1 -f wav "${tmpWav}"`, (err) => {
+        if (err) reject(err);
+        else resolve();
       });
+    });
 
-      stages.audio_extract = "ok";
-    } catch (err) {
-      return res.status(500).json({
-        ok: false,
-        error: "FFmpeg falló al convertir el archivo.",
-        details: err.message,
-        tao: taoPhrase(),
-        stages
-      });
-    }
-
-    // ========================================
-    // 5) TRANSCODIFICACIÓN → listo para Whisper
-    // ========================================
-    const wavBuffer = fs.readFileSync(outputWav);
+    stages.audio_extract = "ok";
     stages.wav = "ok";
 
-    // ========================================
-    // RESPUESTA FINAL (versión Hydra Tao)
-    // ========================================
+    // ------------------------------
+    // 3. LEER WAV Y CODIFICARLO PARA MAKE
+    // ------------------------------
+    const wavBuffer = fs.readFileSync(tmpWav);
+    const wavBase64 = wavBuffer.toString("base64");
+
+    // ------------------------------
+    // 4. RESPUESTA FINAL
+    // ------------------------------
     return res.json({
       ok: true,
       type: stages.input,
@@ -138,16 +86,17 @@ app.post("/process-media", upload.single("media"), async (req, res) => {
       ],
       next_step: "Enviar este audio al módulo Whisper para obtener claridad textual.",
       tao: taoPhrase(),
+      wav_base64: wavBase64,
       stages
     });
 
-  } catch (err) {
-    return res.status(500).json({
-      ok: false,
-      error: "El servidor falló.",
-      details: err.message,
-      tao: taoPhrase()
-    });
+  } catch (error) {
+    console.error("Hydra error:", error);
+    return res.status(500).json({ ok: false, error: error.message });
+  } finally {
+    // Limpieza segura de archivos
+    try { if (fs.existsSync(tmpInput)) fs.unlinkSync(tmpInput); } catch {}
+    try { if (fs.existsSync(tmpWav)) fs.unlinkSync(tmpWav); } catch {}
   }
 });
 
