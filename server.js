@@ -8,90 +8,149 @@ import { exec } from "child_process";
 const app = express();
 app.use(express.json({ limit: "200mb" }));
 
-// Multer para manejar archivos temporales
+// Multer para archivos temporales
 const upload = multer({ dest: "/tmp" });
 
-// Ruta principal
-app.get("/", (req, res) => {
-  res.json({ ok: true, message: "Hydra FFmpeg API active" });
-});
+// Utilidad para frase taoísta
+function taoPhrase() {
+  const frases = [
+    "Cuando el agua se calma, la verdad se refleja.",
+    "El camino aparece cuando dejas de buscarlo con fuerza.",
+    "Nada que sea tuyo puede perderte; nada que te pierda era tuyo.",
+    "La mente que se vacía, encuentra dirección.",
+    "Si el ruido cae, la decisión sube.",
+    "La claridad es un filo que no corta, revela.",
+    "El paso correcto siempre es el más simple."
+  ];
+  return frases[Math.floor(Math.random() * frases.length)];
+}
 
 // ================================
-// EXTRACT AUDIO (MP3)
+// UNIVERSAL MEDIA PROCESSOR
 // ================================
-app.post("/extract-audio", upload.single("video"), async (req, res) => {
+app.post("/process-media", upload.single("media"), async (req, res) => {
+  const stages = {};
+
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: "No video file uploaded" });
+    // Detectar el tipo de input
+    const hasFile = !!req.file;
+    const hasUrl = req.body.url;
+    const hasText = req.body.text;
+
+    let inputPath = null;
+
+    // ========================================
+    // 1) PROCESAR ARCHIVO SUBIDO
+    // ========================================
+    if (hasFile) {
+      stages.input = "file";
+      inputPath = req.file.path;
     }
 
-    const inputPath = req.file.path;
-    const outputPath = `${inputPath}.mp3`;
+    // ========================================
+    // 2) PROCESAR URL → descargar archivo
+    // ========================================
+    else if (hasUrl) {
+      stages.input = "url";
+      const url = req.body.url;
 
-    ffmpeg(inputPath)
-      .output(outputPath)
-      .on("end", () => {
-        res.download(outputPath, "audio.mp3", () => {
-          fs.unlinkSync(inputPath);
-          fs.unlinkSync(outputPath);
+      try {
+        const response = await axios.get(url, { responseType: "arraybuffer" });
+        inputPath = "/tmp/input_from_url";
+        fs.writeFileSync(inputPath, Buffer.from(response.data));
+        stages.download = "ok";
+      } catch (err) {
+        return res.status(400).json({
+          ok: false,
+          error: "No se pudo descargar el archivo desde la URL.",
+          details: err.message,
+          tao: taoPhrase()
         });
-      })
-      .on("error", (err) => {
-        console.error("FFmpeg error:", err);
-        res.status(500).json({ error: "FFmpeg processing failed", details: err });
-      })
-      .run();
-
-  } catch (error) {
-    console.error("Server error:", error);
-    res.status(500).json({ error: "Server crashed", details: error });
-  }
-});
-
-// ================================
-// TRANSCODE VIDEO → WAV (Mono 16kHz)
-// ================================
-app.post("/transcribe", async (req, res) => {
-  try {
-    const { url } = req.body;
-
-    if (!url) {
-      return res.status(400).json({ error: "Missing video URL" });
+      }
     }
 
-    const input = "/tmp/input.mp4";
-    const output = "/tmp/output.wav";
+    // ========================================
+    // 3) SOLO TEXTO → pasa directo a análisis
+    // ========================================
+    else if (hasText) {
+      stages.input = "text";
 
-    // Descargar video
-    const video = await axios.get(url, { responseType: "arraybuffer" });
-    fs.writeFileSync(input, Buffer.from(video.data));
-
-    // Convertir con ffmpeg
-    await new Promise((resolve, reject) => {
-      exec(`ffmpeg -y -i "${input}" -ar 16000 -ac 1 -f wav "${output}"`, (err) => {
-        if (err) reject(err);
-        else resolve();
+      return res.json({
+        ok: true,
+        type: "text",
+        summary: req.body.text,
+        insight: "Tu pensamiento tiene un patrón detectable.",
+        next_step: "Define qué parte de esta reflexión es acción y cuál es ruido.",
+        tao: taoPhrase(),
+        stages
       });
-    });
+    }
 
-    const audio = fs.readFileSync(output);
+    else {
+      return res.status(400).json({
+        ok: false,
+        error: "No se envió archivo, texto ni URL.",
+        tao: taoPhrase()
+      });
+    }
 
-    res.json({
+    // ========================================
+    // 4) EXTRAER AUDIO
+    // ========================================
+    const outputWav = `${inputPath}.wav`;
+
+    try {
+      await new Promise((resolve, reject) => {
+        exec(`ffmpeg -y -i "${inputPath}" -ar 16000 -ac 1 -f wav "${outputWav}"`, (err) => {
+          if (err) reject(err);
+          else resolve();
+        });
+      });
+
+      stages.audio_extract = "ok";
+    } catch (err) {
+      return res.status(500).json({
+        ok: false,
+        error: "FFmpeg falló al convertir el archivo.",
+        details: err.message,
+        tao: taoPhrase(),
+        stages
+      });
+    }
+
+    // ========================================
+    // 5) TRANSCODIFICACIÓN → listo para Whisper
+    // ========================================
+    const wavBuffer = fs.readFileSync(outputWav);
+    stages.wav = "ok";
+
+    // ========================================
+    // RESPUESTA FINAL (versión Hydra Tao)
+    // ========================================
+    return res.json({
       ok: true,
-      message: "Video convertido a WAV",
-      wav_size: audio.length,
-      hint: "Listo para Whisper o GPT-4o Audio"
+      type: stages.input,
+      message: "Media procesado correctamente.",
+      summary: "Audio listo para Whisper u otra IA.",
+      insights: [
+        "El contenido contiene estructura que puede ser analizada.",
+        "Existe un patrón narrativo esperando ser revelado."
+      ],
+      next_step: "Enviar este audio al módulo Whisper para obtener claridad textual.",
+      tao: taoPhrase(),
+      stages
     });
-
-    // Limpieza
-    fs.unlinkSync(input);
-    fs.unlinkSync(output);
 
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    return res.status(500).json({
+      ok: false,
+      error: "El servidor falló.",
+      details: err.message,
+      tao: taoPhrase()
+    });
   }
 });
 
 // Puerto
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 8080;
 app.listen(port, () => console.log("Hydra FFmpeg API running on", port));
